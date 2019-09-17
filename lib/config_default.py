@@ -102,6 +102,14 @@ COINDAEMON_TRUSTED_USER = 'stratum'
 COINDAEMON_TRUSTED_PASSWORD = '***somepassword***'
 
 
+ALGO_NAME = None 
+COINDAEMON_TX = False 
+COINDAEMON_HAS_SEGWIT = None
+CUSTOM_HEADER =  None
+CUSTOM_DIFF1 = None
+COINDAEMON_REWARD = None
+
+
 # Coin Algorithm is the option used to determine the algortithm used by stratum
 # This currently only works with POW SHA256 and Scrypt Coins
 # The available options are scrypt and sha256d.
@@ -109,9 +117,6 @@ COINDAEMON_TRUSTED_PASSWORD = '***somepassword***'
 # Until AutoReward Selecting Code has been implemented the below options are us$
 # For Reward type there is POW and POS. please ensure you choose the currect ty$
 # For SHA256 PoS Coins which support TX Messages please enter yes in the TX sel$
-COINDAEMON_ALGO = 'scrypt'
-COINDAEMON_Reward = 'POW'
-COINDAEMON_SHA256_TX = 'yes'
 
 # ******************** OTHER CORE SETTINGS *********************
 # Use "echo -n '<yourpassword>' | sha256sum | cut -f1 -d' ' "

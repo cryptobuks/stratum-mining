@@ -17,7 +17,7 @@ class DBInterface():
 
     def init_main(self):
         self.dbi.check_tables()
- 
+
         self.q = Queue.Queue()
         self.queueclock = None
 
@@ -26,9 +26,9 @@ class DBInterface():
         self.nextStatsUpdate = 0
 
         self.scheduleImport()
-        
+
         self.next_force_import_time = time.time() + settings.DB_LOADER_FORCE_TIME
-    
+
         signal.signal(signal.SIGINT, self.signal_handler)
 
     def signal_handler(self, signal, frame):
@@ -41,61 +41,56 @@ class DBInterface():
 
     def connectDB(self):
         if settings.DATABASE_DRIVER == "sqlite":
-            log.debug('DB_Sqlite INIT')
             import DB_Sqlite
             return DB_Sqlite.DB_Sqlite()
         elif settings.DATABASE_DRIVER == "mysql":
              if settings.VARIABLE_DIFF:
-                log.debug("DB_Mysql_Vardiff INIT")
                 import DB_Mysql_Vardiff
                 return DB_Mysql_Vardiff.DB_Mysql_Vardiff()
-             else:  
-                log.debug('DB_Mysql INIT')
+             else:
                 import DB_Mysql
                 return DB_Mysql.DB_Mysql()
         elif settings.DATABASE_DRIVER == "postgresql":
-            log.debug('DB_Postgresql INIT')
             import DB_Postgresql
             return DB_Postgresql.DB_Postgresql()
         elif settings.DATABASE_DRIVER == "none":
-            log.debug('DB_None INIT')
             import DB_None
             return DB_None.DB_None()
         else:
             log.error('Invalid DATABASE_DRIVER -- using NONE')
-            log.debug('DB_None INIT')
             import DB_None
             return DB_None.DB_None()
 
     def scheduleImport(self):
         # This schedule's the Import
-        self.queueclock = reactor.callLater(settings.DB_LOADER_CHECKTIME , self.run_import_schedule)
-
-    def run_import_schedule(self):
-        log.debug("DBInterface.run_import_schedule called")
-        
-        if self.q.qsize() >= settings.DB_LOADER_REC_MIN or time.time() >= self.next_force_import_time:
-            self.run_import()
-        
-        self.scheduleImport()
-    
-    def run_import(self, force=False):
-        log.debug("DBInterface.run_import called")
-        if settings.DATABASE_DRIVER == "sqlite":
+        if settings.DATABASE_DRIVER == 'mysql'  or settings.DATABASE_DRIVER == "sqlite":
             use_thread = False
         else:
             use_thread = True
-        
-        if use_thread:
-            reactor.callInThread(self.import_thread, force)
-        else:
-            self.do_import(self.dbi, force)
 
-    def import_thread(self, force=False):
+        if use_thread:
+            self.queueclock = reactor.callLater(settings.DB_LOADER_CHECKTIME , self.run_import_thread)
+        else:
+            self.queueclock = reactor.callLater(settings.DB_LOADER_CHECKTIME , self.run_import)
+
+    def run_import_thread(self):
+        if self.q.qsize() >= settings.DB_LOADER_REC_MIN or time.time() >= self.next_force_import_time:  # Don't incur thread overhead if we're not going to run
+            reactor.callInThread(self.import_thread)
+
+        self.scheduleImport()
+
+    def run_import(self):
+        self.do_import(self.dbi, False)
+        self.scheduleImport()
+
+    def run_import_force(self):
+        self.do_import(self.dbi, True)
+        self.scheduleImport()
+
+    def import_thread(self):
         # Here we are in the thread.
         dbi = self.connectDB()
-        self.do_import(dbi, force)
-        
+        self.do_import(dbi, False)
         dbi.close()
 
     def _update_pool_info(self, data):
@@ -104,7 +99,7 @@ class DBInterface():
 
     def do_import(self, dbi, force):
         log.debug("DBInterface.do_import called. force: %s, queue size: %s", 'yes' if force == True else 'no', self.q.qsize())
-        
+
         # Flush the whole queue on force
         forcesize = 0
         if force == True:
@@ -113,23 +108,20 @@ class DBInterface():
         # Only run if we have data
         while self.q.empty() == False and (force == True or self.q.qsize() >= settings.DB_LOADER_REC_MIN or time.time() >= self.next_force_import_time or forcesize > 0):
             self.next_force_import_time = time.time() + settings.DB_LOADER_FORCE_TIME
-            
+
             force = False
             # Put together the data we want to import
             sqldata = []
             datacnt = 0
-            
+
             while self.q.empty() == False and datacnt < settings.DB_LOADER_REC_MAX:
                 datacnt += 1
-                try:
-                    data = self.q.get(timeout=1)
-                    sqldata.append(data)
-                    self.q.task_done()
-                except Queue.Empty:
-                    log.warning("Share Records Queue is empty!")
+                data = self.q.get()
+                sqldata.append(data)
+                self.q.task_done()
 
             forcesize -= datacnt
-                
+
             # try to do the import, if we fail, log the error and put the data back in the queue
             try:
                 log.info("Inserting %s Share Records", datacnt)
@@ -151,61 +143,69 @@ class DBInterface():
         except Exception as e:
             log.error("Update Found Block Share Record Failed: %s", e.args[0])
 
+    @defer.inlineCallbacks
     def check_password(self, username, password):
         if username == "":
             log.info("Rejected worker for blank username")
-            return False
+            defer.returnValue(False)
         allowed_chars = Set('0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-.')
         if Set(username).issubset(allowed_chars) != True:
             log.info("Username contains bad arguments")
-            return False
+            defer.returnValue(False)
         if username.count('.') > 1:
             log.info("Username contains multiple . ")
-            return False
-        
+            defer.returnValue(False)
+
         # Force username and password to be strings
         username = str(username)
         password = str(password)
-        if not settings.USERS_CHECK_PASSWORD and self.user_exists(username): 
-            return True
+        if not settings.USERS_CHECK_PASSWORD and (yield self.user_exists(username)):
+            defer.returnValue(True)
         elif self.cache.get(username) == password:
-            return True
-        elif self.dbi.check_password(username, password):
+            defer.returnValue(True)
+        elif (yield defer.maybeDeferred(self.dbi.check_password, username, password)):
             self.cache.set(username, password)
-            return True
+            defer.returnValue(True)
         elif settings.USERS_AUTOADD == True:
-            if self.dbi.get_uid(username) != False:
-                uid = self.dbi.get_uid(username)
+            uid = yield defer.maybeDeferred(self.dbi.get_uid, username)
+            if uid != False:
                 self.dbi.insert_worker(uid, username, password)
                 self.cache.set(username, password)
-                return True
-        
+                defer.returnValue(True)
+
         log.info("Authentication for %s failed" % username)
-        return False
-    
+        defer.returnValue(False)
+
     def list_users(self):
         return self.dbi.list_users()
-    
+
+    @defer.inlineCallbacks
     def get_user(self, id):
+        log.debug("get_user %s" % id)
         if self.cache.get(id) is None:
-            self.cache.set(id,self.dbi.get_user(id))
-        return self.cache.get(id)
- 
+            log.debug("%s not in cache" % id)
+            user = yield defer.maybeDeferred(self.dbi.get_user, id)
+            ret = self.cache.set(id, user)
+            log.debug("cache set return: %s" % ret)
+        defer.returnValue(self.cache.get(id))
 
+
+    @defer.inlineCallbacks
     def user_exists(self, username):
+        log.debug("user_exists looking for %s" % username)
         if self.cache.get(username) is not None:
-            return True
-        user = self.get_user(username)
-        return user is not None 
+            defer.returnValue(True)
+        user = yield self.get_user(username)
+        defer.returnValue(user is not None)
 
-    def insert_user(self, username, password):        
+    def insert_user(self, username, password):
         return self.dbi.insert_user(username, password)
 
     def delete_user(self, username):
         self.mc.delete(username)
         self.usercache = {}
         return self.dbi.delete_user(username)
-        
+
     def update_user(self, username, password):
         self.mc.delete(username)
         self.mc.set(username, password)
@@ -216,12 +216,11 @@ class DBInterface():
 
     def get_pool_stats(self):
         return self.dbi.get_pool_stats()
-    
+
     def get_workers_stats(self):
         return self.dbi.get_workers_stats()
-    def get_worker_diff(self,username):
-     	return self.dbi.get_worker_diff(username)
 
     def clear_worker_diff(self):
         return self.dbi.clear_worker_diff()
+
 
